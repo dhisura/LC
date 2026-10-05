@@ -1,11 +1,26 @@
 """System execution tools for Windows PowerShell with guard integration."""
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from lc.config import COMMAND_TIMEOUT
 from lc.tools.guard import ExecutionGuard
+
+# Windows PowerShell 5.1 writes to the console's active code page (cp1252 on
+# most Western locales), not UTF-8. Asking subprocess to decode UTF-8 turns every
+# non-ASCII character into U+FFFD. Setting the encoding inside the session makes
+# PowerShell emit UTF-8 so `encoding="utf-8"` below actually decodes it.
+_UTF8_PREAMBLE = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+
+
+def _resolve_powershell() -> str:
+    """Prefer PowerShell 7 (UTF-8 native), fall back to Windows PowerShell."""
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        return pwsh
+    return shutil.which("powershell") or shutil.which("powershell.exe") or "powershell"
 
 
 @dataclass
@@ -57,9 +72,17 @@ class SystemRunner:
 
         start_time = time.time()
         try:
-            # Run via Windows PowerShell
+            # Run via Windows PowerShell. `pwsh` (PowerShell 7) is UTF-8 by
+            # default; 5.1 needs the preamble to match.
+            shell = _resolve_powershell()
+            argv: List[str] = [shell, "-NoProfile", "-NonInteractive", "-Command"]
+            if not shell.lower().endswith("pwsh.exe"):
+                argv.append(_UTF8_PREAMBLE + effective_cmd)
+            else:
+                argv.append(effective_cmd)
+
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", effective_cmd],
+                argv,
                 cwd=str(Path(cwd).resolve()),
                 capture_output=True,
                 text=True,

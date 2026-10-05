@@ -1,5 +1,10 @@
 import unittest
-from calc import add, subtract, multiply, divide
+
+# Relative import so this runs both as `python -m unittest test_project.test_calc`
+# and under `unittest discover`. A bare `from calc import ...` only worked when the
+# CWD happened to be test_project/, which is not how QA invokes it.
+from .calc import add, subtract, multiply, divide
+
 
 class TestCalc(unittest.TestCase):
     def test_add(self):
@@ -22,5 +27,6 @@ class TestCalc(unittest.TestCase):
         self.assertEqual(divide(-3, 6), -0.5)
         self.assertIsNone(divide(3, 0), None)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

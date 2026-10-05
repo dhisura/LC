@@ -10,3 +10,8 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Runtime memory: institutional data (sessions, mistake vaccines) lives in
+# ~/.lc/lc_memory.db. This copy at the repo root was committed by mistake.
+lc_memory.db
+*.db
