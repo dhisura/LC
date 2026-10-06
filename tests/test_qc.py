@@ -39,11 +39,18 @@ def qa(success=True):
 class TestVerdictParsing(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        # Point QC at a workspace this test owns. Passing the global
+        # tempfile.gettempdir() here hands QC the entire %TEMP% as its
+        # sandbox -- and, because other tests aim their escape targets at the
+        # shared temp root, makes this test's behaviour depend on leftovers
+        # from unrelated runs.
+        ws = Path(self.temp_dir.name) / "workspace"
+        ws.mkdir()
         self.qc = QualityControl(
             llm=None,
             memory=mock.MagicMock(),
             console=mock.MagicMock(),
-            workspace=tempfile.gettempdir(),
+            workspace=str(ws),
         )
 
     def tearDown(self):

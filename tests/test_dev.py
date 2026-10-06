@@ -27,7 +27,12 @@ def make_ticket(suggested_files=None):
 class TestDevParsing(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.ws = Path(self.temp_dir.name)
+        # The workspace is a *child* of the temp dir, not the temp dir itself.
+        # Escape tests need a parent to aim at, and if that parent is the shared
+        # %TEMP% then a leftover from an earlier failing run -- or another test's
+        # workspace -- makes these assertions depend on machine state.
+        self.ws = Path(self.temp_dir.name) / "workspace"
+        self.ws.mkdir()
         self.dev = Developer(llm=None, console=mock.MagicMock(), workspace=str(self.ws))
         self.ticket = make_ticket()
 
@@ -79,7 +84,12 @@ class TestDevParsing(unittest.TestCase):
         self.assertFalse(escaped.exists())
         for record in results:
             target = (self.ws / record["file"]).resolve()
-            self.assertTrue(str(target).startswith(str(self.ws)))
+            # Compare against the *resolved* workspace, exactly as
+            # FileManager does. String-prefixing an unresolved self.ws works
+            # only when the two happen to have the same spelling; on a runner
+            # whose TEMP is a junction, they do not, and the assertion failed
+            # while the production containment check was correct all along.
+            self.assertTrue(target.is_relative_to(self.ws.resolve()))
             self.assertTrue(target.exists())
 
     def test_fence_lines_are_stripped_from_the_written_file(self):
