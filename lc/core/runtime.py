@@ -112,7 +112,13 @@ class AgentRuntime:
             raise
 
     def cancel_active_task(self) -> bool:
-        """Requests cancellation of the currently active context if present."""
+        """Requests cancellation of the currently active context if present.
+
+        The token is only a request: a running workflow aborts at its next
+        `check_cancelled()`. Nothing in the sprint loop called those, so the
+        token used to be set and never observed -- `run_sprint` now checks it
+        between every role invocation.
+        """
         if self._current_context:
             self._current_context.cancellation_token.cancel()
             return True

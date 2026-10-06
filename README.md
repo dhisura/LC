@@ -73,6 +73,23 @@ front of every one of them.
 
 Use `--yes` only in a disposable workspace or a container — it disables every prompt.
 
+### The workspace is a boundary
+
+File operations are confined to `--workspace`. `FileManager.resolve()` rejects
+anything that lands outside it — `../`, an absolute path, or a symlink pointing
+out — so a `[FILE: ...]` header naming `../../.ssh/authorized_keys` is refused
+rather than written. A refused file is skipped and reported; the rest of the
+sprint's work is kept.
+
+### Permission tiers
+
+`AgentState.permission_level` tracks how destructive the agent currently is,
+derived from the lifecycle mode (`IDLE`→observe, `PLANNING`→read,
+`EXECUTING`/`VERIFYING`→write). No mode grants the destructive tier implicitly;
+`state.can_perform(level)` answers whether an operation is in bounds. Only
+`EXECUTING` is entered after the planning gate, so file writes never happen
+before you approve the plan.
+
 ## 🧩 Skills
 
 Skills are folders containing a `SKILL.md` (description injected into agent prompts)
@@ -114,10 +131,30 @@ in the source tree.
 | `LC_OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `LC_MODEL` | `qwen2.5:3b` | Default model |
 | `LC_HOME` | `~/.lc` | Memory DB + skills directory |
+| `LC_GUARD_EXTRA_SAFE_COMMANDS` | *(empty)* | Extra auto-approved commands (comma-separated) |
+| `LC_GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS` | *(empty)* | Extra auto-approved read-only git subcommands |
+| `LC_GUARD_EXTRA_SENSITIVE_MARKERS` | *(empty)* | Extra path fragments treated as credentials |
+
+The three `LC_GUARD_EXTRA_*` variables widen the ExecutionGuard's allowlists so a
+project can auto-approve its own read-only tools without `--yes`:
+
+```bash
+setx LC_GUARD_EXTRA_SAFE_COMMANDS "npm, npx, bun"
+```
+
+Two limits are fixed regardless of these settings:
+
+- Shell metacharacters (`;`, `|`, `>`, `$(...)`) always require approval, so
+  `npm run build; Remove-Item .` still prompts.
+- Mutating git subcommands (`push`, `commit`, `reset`, `clean`, `add`, …) can
+  never be added to the git allowlist. Listing one is silently ignored rather
+  than honoured.
 
 ## ⚠️ A note on scope
 
-The bundled `github_deploy` skill initialises a git repo, commits everything, pushes
-it, and turns on GitHub Pages — creating a **public** repository under your account
-without a second confirmation. Read `skills/github_deploy/skill.py` before letting an
-autonomous run near it, and prefer a scratch directory.
+The bundled `github_deploy` skill creates a **public** GitHub repository and turns
+on GitHub Pages. It refuses to do either without `confirm=True` in its context, and
+it stops rather than publishing when the workspace contains credential-like files
+(`.env`, `*.pem`, `id_rsa`, …) or sits inside an existing git repository. Pass
+`dry_run=True` to print the plan without contacting GitHub. See
+`skills/github_deploy/SKILL.md`.

@@ -47,3 +47,26 @@ SAFE_COMMAND_PREFIXES = (
     "where", "which", "get-command",
     "echo", "pwd", "get-location"
 )
+
+
+def _env_list(name: str):
+    """Read a comma-separated environment variable into a tuple."""
+    raw = os.environ.get(name, "")
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+# Per-project additions to the ExecutionGuard's allowlists, so a project can
+# auto-approve its own read-only tools without editing the guard or running
+# with --yes.
+#
+#     setx LC_GUARD_EXTRA_SAFE_COMMANDS "npm, npx, bun"
+#
+# These can only *widen* the allowlist. Two things stay fixed regardless:
+# the shell-metacharacter check (so `npm run x; rm -rf .` still needs
+# approval) and the read-only-only nature of git subcommands (so `commit` and
+# `push` cannot be added here).
+GUARD_EXTRA_SAFE_COMMANDS = _env_list("LC_GUARD_EXTRA_SAFE_COMMANDS")
+GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS = _env_list("LC_GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS")
+# Extra path fragments treated as credential material, e.g. a project-specific
+# secrets directory.
+GUARD_EXTRA_SENSITIVE_MARKERS = _env_list("LC_GUARD_EXTRA_SENSITIVE_MARKERS")

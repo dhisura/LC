@@ -11,11 +11,26 @@ class FileManager:
         self.workspace = Path(workspace).resolve()
 
     def resolve(self, path: str) -> Path:
-        """Resolve a relative or absolute path within workspace context."""
+        """Resolve a path and refuse anything that escapes the workspace.
+
+        The workspace is the trust boundary: `dev.write_solution` passes the
+        `[FILE: ...]` headers straight out of the LLM response to `write_file`,
+        so an emitted path of `../../.ssh/authorized_keys` or an absolute
+        `C:/...` would otherwise let the model write anywhere the process can.
+        Resolving first also collapses `..` and follows symlinks, so a link
+        planted inside the workspace cannot point out of it.
+        """
         p = Path(path)
-        if p.is_absolute():
-            return p
-        return (self.workspace / p).resolve()
+        # An absolute path is not "already inside" -- it is simply a different
+        # root, so it goes through the same containment check as a relative one.
+        candidate = (p if p.is_absolute() else self.workspace / p).resolve()
+
+        if not candidate.is_relative_to(self.workspace):
+            raise ValueError(
+                f"Path escapes the workspace: {path!r} resolves to {candidate}, "
+                f"which is outside {self.workspace}."
+            )
+        return candidate
 
     def read_file(self, path: str) -> str:
         """Reads a file content as text."""
