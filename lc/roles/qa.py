@@ -61,7 +61,12 @@ class QAEngineer(BaseRole):
                         return f"pytest {target_test}"
                 except Exception:
                     pass
-                return f"python -m unittest {target_test}"
+                # `python -m unittest path/to/test_x.py` only works when the file
+                # is importable as a module: a bare `from calc import ...` inside
+                # it needs the test's own directory on sys.path, and a
+                # directory path is not a module name. Discovery run from the
+                # workspace root handles both cases.
+                return "python -m unittest discover -s . -p \"test_*.py\""
 
             # Default to running the main file as a syntax/runtime sanity check
             main_file = file_names[0] if file_names else "main.py"

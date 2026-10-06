@@ -11,11 +11,28 @@ import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from lc.config import LC_HOME
+from lc.config import LC_HOME, SKILLS_DIR
 
 
-SKILLS_DIR = LC_HOME / "skills"
-SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+# NOTE: deliberately no mkdir at import time. Creating ~/.lc/skills as a side
+# effect of `import lc.engine.skills` made read-only commands like
+# `lc --models` mutate the filesystem. SkillManager creates it on demand.
+
+
+def _bundled_skills_dir() -> Path:
+    """Locate the ``skills/`` folder shipped inside the package, if present.
+
+    Walks up from this file so it works from a source checkout, an editable
+    install, and a wheel alike. Returns a non-existent path when running from an
+    installed package that does not bundle one -- callers treat that as "no
+    bundled skills" rather than an error.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "skills"
+        if candidate.is_dir():
+            return candidate
+    return SKILLS_DIR
 
 
 @dataclass
@@ -32,28 +49,47 @@ class Skill:
 
 
 class SkillManager:
-    """Discovers, loads, and manages skill plugins from the skills directory."""
+    """Discovers, loads, and manages skill plugins from the skills directory.
+
+    Two directories are searched, in order:
+
+    1. ``~/.lc/skills`` -- machine-local, where ``lc --new-skill`` scaffolds.
+    2. ``<repo>/skills`` -- the bundled plugins that ship with the source.
+
+    The second one matters: skills committed to the repo were previously never
+    loaded by anything, because discovery only ever looked in ``~/.lc``. Entries
+    in ``~/.lc`` win on name collision, so a user can override a bundled skill.
+    """
 
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = skills_dir or SKILLS_DIR
-        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self.bundled_dir = _bundled_skills_dir()
         self.skills: Dict[str, Skill] = {}
 
+    def _search_dirs(self) -> List[Path]:
+        local = Path(self.skills_dir)
+        bundled = Path(self.bundled_dir)
+        if bundled == local:
+            return [local]
+        return [local, bundled]
+
     def discover(self) -> List[Skill]:
-        """Auto-discover all skill folders in the skills directory."""
+        """Auto-discover skill folders across the local and bundled dirs."""
         self.skills.clear()
-        if not self.skills_dir.exists():
-            return []
 
-        for folder in sorted(self.skills_dir.iterdir()):
-            if not folder.is_dir():
+        # Bundled first so that ~/.lc entries overwrite them on collision.
+        for directory in reversed(self._search_dirs()):
+            if not directory.exists():
                 continue
-            if folder.name.startswith("_") or folder.name.startswith("."):
-                continue
+            for folder in sorted(directory.iterdir()):
+                if not folder.is_dir():
+                    continue
+                if folder.name.startswith("_") or folder.name.startswith("."):
+                    continue
 
-            skill = self._load_skill(folder)
-            if skill:
-                self.skills[skill.name] = skill
+                skill = self._load_skill(folder)
+                if skill:
+                    self.skills[skill.name] = skill
 
         return list(self.skills.values())
 
