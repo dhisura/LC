@@ -1,4 +1,4 @@
-```python
+
 """Skill: UI/UX
 
 This module is auto-loaded by LC.
@@ -391,4 +391,3 @@ def run(context: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
-```
