@@ -35,6 +35,50 @@ class QualityControl(BaseRole):
         self.workspace = workspace
         self.memory = memory or MemoryManager()
 
+    def _parse_verdict(self, raw_review: str) -> bool:
+        """True only if the review's [VERDICT] section actually says APPROVED.
+
+        The old check was `"APPROVED" in raw_review.upper()`, which matched
+        "NOT APPROVED", "cannot be APPROVED", and a verdict of REJECTED
+        followed by prose mentioning the word. Since QC has the final say, that
+        could sign off on code the reviewer had explicitly turned down.
+
+        Reads the [VERDICT] section when present; otherwise falls back to the
+        first standalone APPROVED/REJECTED line, then to the whole text.
+        """
+        lines = [ln.strip() for ln in raw_review.splitlines() if ln.strip()]
+
+        # Prefer an explicit [VERDICT] block.
+        in_verdict = False
+        verdict_tokens: List[str] = []
+        for line in lines:
+            if "[VERDICT]" in line.upper():
+                in_verdict = True
+                continue
+            if in_verdict:
+                if line.startswith("["):
+                    break  # next section
+                verdict_tokens.append(line.upper())
+
+        if verdict_tokens:
+            joined = " ".join(verdict_tokens)
+            # REJECTED must win over a bare APPROVED appearing in the same block.
+            if "REJECTED" in joined:
+                return False
+            return "APPROVED" in joined
+
+        # No explicit section: use the first line that is exactly a verdict.
+        for line in lines:
+            upper = line.upper().strip(" .*:")
+            if upper in ("APPROVED", "REJECTED"):
+                return upper == "APPROVED"
+
+        # Last resort -- but exclude the negated forms explicitly.
+        upper_all = raw_review.upper()
+        if "NOT APPROVED" in upper_all or "NOT REJECTED" in upper_all:
+            return False
+        return "APPROVED" in upper_all and "REJECTED" not in upper_all
+
     def review_sprint(
         self,
         ticket: Ticket,
@@ -74,7 +118,7 @@ APPROVED (or REJECTED)
 """
         raw_review = self.generate(prompt, temperature=0.1)
 
-        approved = qa_result.success and "APPROVED" in raw_review.upper()
+        approved = qa_result.success and self._parse_verdict(raw_review)
         diff_score = "Acceptable"
         feedback = raw_review
 

@@ -16,6 +16,7 @@ if sys.platform == "win32":
 
 from lc.config import DEFAULT_MODEL, OLLAMA_HOST, MAX_QA_RETRIES
 from lc.core import AgentRuntime, AgentMode, EventType
+from lc.core.context import ExecutionContext, OperationCancelledError
 from lc.engine.llm import LLMClient
 from lc.engine.memory import MemoryManager
 from lc.engine.skills import SkillManager
@@ -26,6 +27,18 @@ from lc.roles.dev import Developer
 from lc.roles.qa import QAEngineer, QAResult
 from lc.roles.qc import QualityControl
 from lc.ui.console import LCConsole
+
+
+class SprintFailed(RuntimeError):
+    """Raised when the sprint cannot deliver. Surfaces as a workflow failure.
+
+    The runtime treats a returned value as success, so every unsuccessful exit
+    from the sprint has to raise; returning False would publish TASK_COMPLETED.
+    """
+
+
+class SprintRejected(RuntimeError):
+    """Raised when QC refuses to sign off. Surfaces as a workflow failure."""
 
 
 class LCSprintOrchestrator:
@@ -40,6 +53,7 @@ class LCSprintOrchestrator:
         self.workspace = str(Path(workspace).resolve())
         self.runtime = AgentRuntime()
         self.console = LCConsole()
+        self._attach_event_listeners(self.runtime.event_bus)
         self.guard = ExecutionGuard(auto_approve=auto_approve)
         self.runner = SystemRunner(guard=self.guard)
         self.memory = MemoryManager()
@@ -52,10 +66,55 @@ class LCSprintOrchestrator:
         self.qa = QAEngineer(llm=self.llm, runner=self.runner, console=self.console, workspace=self.workspace)
         self.qc = QualityControl(llm=self.llm, memory=self.memory, console=self.console, workspace=self.workspace)
 
+    def _attach_event_listeners(self, event_bus) -> None:
+        """Render lifecycle events as they happen.
+
+        Nothing subscribed to the bus before, so every EVENT_* contract the
+        runtime published went to no one -- the state machine was observable
+        only by inspecting `runtime.state` after the fact.
+        """
+        def on_progress(event) -> None:
+            progress = event.payload.get("progress")
+            activity = event.payload.get("activity") or ""
+            if progress is None or not activity:
+                return
+            print(f"\n  [{int(progress * 100):3d}%] {activity}")
+
+        event_bus.subscribe(EventType.STATE_CHANGED, on_progress)
+
     def run_sprint(self, task: str) -> bool:
-        """Executes the full company sprint lifecycle."""
+        """Executes the full company sprint lifecycle.
+
+        The role sequence is wrapped in a Workflow and run through
+        `AgentRuntime.execute_workflow`, so lifecycle events (TASK_STARTED /
+        COMPLETED / FAILED / CANCELLED) and the failure-mode transitions are
+        published in exactly one place instead of being re-emitted by hand at
+        every exit path.
+        """
         ctx = self.runtime.create_context(task=task, workspace=self.workspace)
-        ctx.emit(EventType.TASK_STARTED, {"task": task, "workspace": self.workspace})
+
+        class SprintWorkflow:
+            """Adapts `execute_sprint` to the runtime's Workflow protocol."""
+
+            def run(self, context) -> bool:
+                return self_outer.execute_sprint(task, context)
+
+        self_outer = self
+        try:
+            return bool(self.runtime.execute_workflow(SprintWorkflow(), ctx))
+        except OperationCancelledError:
+            print("\n\033[33mSprint cancelled by user.\033[0m\n")
+            return False
+        except SprintRejected as rej:
+            print(f"\n\033[1;33m[!] Sprint completed with QC reservations: {rej}\033[0m\n")
+            return False
+        except SprintFailed:
+            # The runtime already printed the fail-fast escalation and recorded
+            # the session; the non-zero exit code is the signal.
+            return False
+
+    def execute_sprint(self, task: str, ctx: ExecutionContext) -> bool:
+        """The sprint itself, assuming the runtime already owns the lifecycle."""
         self.console.print_banner(model_name=self.llm.model, task=task)
 
         # 1. Healthcheck
@@ -78,10 +137,10 @@ class LCSprintOrchestrator:
             ctx.transition_state(AgentMode.WAITING_PERMISSION, activity="planning_gate_approval")
             approved = self.console.prompt_gate("Approve ticket plan and begin autonomous sprint?")
             if not approved:
-                ctx.transition_state(AgentMode.CANCELLED, activity="aborted_by_user_at_gate")
-                ctx.emit(EventType.TASK_CANCELLED, {"reason": "User aborted at Planning Gate"})
-                print("\n\033[33mSprint aborted by user at Planning Gate.\033[0m")
-                return False
+                # Cancel through the token so the runtime publishes TASK_CANCELLED
+                # and transitions to CANCELLED, like every other exit path.
+                ctx.cancellation_token.cancel()
+                ctx.check_cancelled()
 
         # 4. Vaccine Retrieval & Dev Implementation
         ctx.transition_state(AgentMode.EXECUTING, activity="writing_solution", progress=0.3)
@@ -103,6 +162,9 @@ class LCSprintOrchestrator:
         qa_result: Optional[QAResult] = None
 
         while attempt <= max_attempts:
+            # Cooperative cancellation: each role call is an LLM round-trip that
+            # can take minutes, so check between them.
+            ctx.check_cancelled()
             ctx.transition_state(AgentMode.VERIFYING, activity=f"qa_verification_attempt_{attempt}", progress=0.6)
             ctx.emit(EventType.VERIFICATION_STARTED, {"attempt": attempt})
             qa_result = self.qa.verify_solution(ticket, dev_files, attempt=attempt)
@@ -129,8 +191,6 @@ class LCSprintOrchestrator:
 
         if not qa_result or not qa_result.success:
             err_msg = qa_result.output[:300] if qa_result else "Verification failed"
-            ctx.transition_state(AgentMode.FAILED, activity="fail_fast_halt", error=err_msg)
-            ctx.emit(EventType.TASK_FAILED, {"error": err_msg})
             self.console.print_role_message(
                 "QA",
                 f"🛑 **Sprint Halted (Fail-Fast Rule Triggered)**\n\n"
@@ -140,7 +200,10 @@ class LCSprintOrchestrator:
                 subtitle="Fail-Fast Escalation"
             )
             self.memory.record_session(task=task, status="FAILED", summary="Failed verification limit")
-            return False
+            # Raise rather than return False: the runtime reads a returned value
+            # as a *successful* workflow, so returning here published
+            # TASK_COMPLETED for a sprint that failed verification.
+            raise SprintFailed(f"Verification failed after {MAX_QA_RETRIES} fix attempts: {err_msg}")
 
         # 6. QC Sign-Off & Mistake Vaccine Creation
         ctx.transition_state(AgentMode.VERIFYING, activity="qc_final_review", progress=0.85)
@@ -155,15 +218,13 @@ class LCSprintOrchestrator:
         self.memory.record_session(task=task, status=status_str, summary=qc_report.feedback[:300])
 
         if qc_report.approved:
-            ctx.transition_state(AgentMode.COMPLETED, activity="sprint_completed", progress=1.0)
-            ctx.emit(EventType.TASK_COMPLETED, {"status": "SUCCESS"})
+            ctx.transition_state(AgentMode.VERIFYING, activity="sprint_completed", progress=1.0)
             print("\n\033[1;32m[DONE] Sprint completed successfully! Everyone goes home on time.\033[0m\n")
             return True
         else:
-            ctx.transition_state(AgentMode.FAILED, activity="qc_rejected", error=qc_report.feedback)
-            ctx.emit(EventType.TASK_FAILED, {"status": "REJECTED", "feedback": qc_report.feedback})
-            print("\n\033[1;33m[!] Sprint completed with QC reservations.\033[0m\n")
-            return False
+            # Report a QC rejection as a workflow failure so the runtime sets
+            # FAILED and publishes TASK_FAILED with the feedback attached.
+            raise SprintRejected(qc_report.feedback or "QC rejected the sprint")
 
 
 def main():

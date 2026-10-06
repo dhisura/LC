@@ -18,6 +18,33 @@ class AgentMode(str, Enum):
     CANCELLED = "cancelled"
 
 
+class PermissionLevel:
+    """Permission tiers an operation must meet or exceed.
+
+    `AgentState.permission_level` was a field nobody ever wrote to. These
+    constants give it meaning: a mode implies a tier, and a command is only
+    auto-approved when the active tier covers it.
+    """
+    OBSERVE = 0  # read-only inspection
+    READ = 1     # read files
+    WRITE = 2    # create or modify files
+    DESTRUCTIVE = 3  # delete, force-push, publish
+
+
+# The tier each mode is allowed to reach. EXECUTING is the only mode that
+# writes files, and it is entered only after a permission gate in the CLI.
+MODE_PERMISSION = {
+    AgentMode.IDLE: PermissionLevel.OBSERVE,
+    AgentMode.PLANNING: PermissionLevel.READ,
+    AgentMode.WAITING_PERMISSION: PermissionLevel.READ,
+    AgentMode.EXECUTING: PermissionLevel.WRITE,
+    AgentMode.VERIFYING: PermissionLevel.WRITE,
+    AgentMode.COMPLETED: PermissionLevel.OBSERVE,
+    AgentMode.FAILED: PermissionLevel.OBSERVE,
+    AgentMode.CANCELLED: PermissionLevel.OBSERVE,
+}
+
+
 @dataclass
 class AgentState:
     """Single Source of Truth for the agent's live runtime state.
@@ -76,9 +103,18 @@ class AgentState:
             self.active_app = active_app
         if permission_level is not None:
             self.permission_level = int(permission_level)
+        else:
+            # Track the mode's ceiling by default, so a consumer can ask
+            # "how destructive is this agent right now?" without hardcoding the
+            # mode->tier mapping at every call site. An explicit value still wins.
+            self.permission_level = MODE_PERMISSION[mode]
 
         self.updated_at = time.time()
         return self
+
+    def can_perform(self, level: int) -> bool:
+        """True if the active permission level covers `level`."""
+        return self.permission_level >= int(level)
 
     def to_dict(self) -> Dict[str, Any]:
         """Returns a clean JSON-serializable dictionary representation."""

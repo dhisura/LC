@@ -1,12 +1,22 @@
 """Execution Guard & Permission Interceptor for Windows system actions."""
 from typing import FrozenSet, List, Optional, Tuple
 
+from lc.config import (
+    GUARD_EXTRA_SAFE_COMMANDS,
+    GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS,
+    GUARD_EXTRA_SENSITIVE_MARKERS,
+)
+
 # Characters that let one "command" do more than one thing, reach outside its
 # argv, or write to disk. A command is only considered read-only if every one of
 # these appears exclusively inside quotes.
 #
 # `$` and `(` matter because PowerShell expands subexpressions there: the whole
 # of `echo $(Remove-Item -Recurse C:\)` looks like a bare `echo` otherwise.
+#
+# This set is not configurable: a project that could relax it could re-admit
+# the very chaining this tokeniser exists to catch. Per-project *additions* to
+# the allowlists below are allowed instead (see GUARD_EXTRA_* in lc.config).
 _UNSAFE_CHARS = frozenset(";|&><`$()\n\r")
 
 # Quote characters we understand, plus the PowerShell single-quote escape.
@@ -69,6 +79,41 @@ _SENSITIVE_PATH_MARKERS: Tuple[str, ...] = (
     ".aws", ".azure", ".kube", ".gnupg",
     "credentials", ".netrc", "shadow", ".env",
 )
+
+
+# Git subcommands that must never be auto-approved, whatever a project's
+# LC_GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS says. Without this, setting that variable
+# to `push` would put `git push` on the silent path -- a configuration knob
+# that silently disabled the guard it was meant to extend.
+#
+# The rule the list encodes: anything that writes to the repo, the index, a
+# remote, or a reflog. `fetch`/`pull` are absent because they only read refs
+# and write FETCH_HEAD/ORIG_HEAD locally, and are gated like any other
+# extension via the env var.
+_GIT_NEVER_AUTOMATIC: FrozenSet[str] = frozenset({
+    "add", "am", "apply", "checkout", "cherry-pick", "clean", "commit",
+    "fetch", "gc", "init", "merge", "mv", "pull", "push", "rebase",
+    "receive-pack", "revert", "reset", "restore", "send-pack", "stage",
+    "stash", "submodule", "switch", "tag", "update-index", "update-ref",
+    "worktree",
+})
+
+_READ_ONLY_COMMANDS = _READ_ONLY_COMMANDS | frozenset(
+    c.lower() for c in GUARD_EXTRA_SAFE_COMMANDS
+)
+
+# Read-only git subcommands may be added per project, but never a mutating
+# one: the denylist above is subtracted last so it always wins.
+_GIT_READ_ONLY_SUBCOMMANDS = (
+    (_GIT_READ_ONLY_SUBCOMMANDS | frozenset(
+        s.lower() for s in GUARD_EXTRA_SAFE_GIT_SUBCOMMANDS
+    ))
+    - _GIT_NEVER_AUTOMATIC
+)
+
+_SENSITIVE_PATH_MARKERS = tuple(
+    _SENSITIVE_PATH_MARKERS
+) + tuple(m for m in GUARD_EXTRA_SENSITIVE_MARKERS if m not in _SENSITIVE_PATH_MARKERS)
 
 
 def _scan(text: str) -> Optional[List[str]]:
@@ -236,6 +281,17 @@ class ExecutionGuard:
             return False
 
         if subcommand in _GIT_READ_ONLY_SUBCOMMANDS:
+            # A second subcommand name is a git pathspec (`git log push` is a
+            # legitimate history query), so it cannot be rejected outright --
+            # but a *mutating* subcommand name here is not a pathspec anyone
+            # means. This is what stopped `git <read-only> push` from being
+            # waved through.
+            if any(
+                arg in _GIT_NEVER_AUTOMATIC
+                for arg in remaining
+                if not arg.startswith("-")
+            ):
+                return False
             return self._is_allowed_args(lowered)
 
         if subcommand in _GIT_FLAG_ONLY_SUBCOMMANDS:

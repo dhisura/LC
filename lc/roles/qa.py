@@ -2,6 +2,7 @@
 Runs real PowerShell test executions, checks runtime errors, and manages the Fail-Fast loop.
 """
 from dataclasses import dataclass
+import ast
 from typing import List, Dict, Any, Optional
 from lc.roles.base import BaseRole
 from lc.roles.pm import Ticket
@@ -35,6 +36,47 @@ class QAEngineer(BaseRole):
         self.runner = runner or SystemRunner()
         self.file_manager = FileManager(workspace)
 
+    def _looks_like_pytest(self, test_file: str) -> bool:
+        """True if `test_file` genuinely uses pytest rather than unittest.
+
+        The previous check was a substring scan for "pytest" over the whole file,
+        which misfired twice over: a comment mentioning pytest routed a plain
+        unittest file to a runner that may not be installed, and a real pytest
+        file that merely used bare `def test_...` functions without importing
+        anything was sent to unittest, which cannot collect them. Matching the
+        import, or pytest-only constructs, avoids both.
+        """
+        try:
+            content = self.file_manager.read_file(test_file)
+        except (OSError, ValueError):
+            # Unreadable (or now out-of-bounds) -- fall through to unittest
+            # discovery rather than guessing at a runner.
+            return False
+
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return False
+
+        for node in ast.walk(tree):
+            # import pytest / from pytest import ...
+            if isinstance(node, ast.Import):
+                if any(alias.name.split(".")[0] == "pytest" for alias in node.names):
+                    return True
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[0] == "pytest":
+                    return True
+
+        # pytest-only constructs that unittest cannot collect anyway.
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("raises", "warns", "approx", "fixture", "mark")
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "pytest"
+            for node in ast.walk(tree)
+        )
+
     def determine_test_command(self, ticket: Ticket, dev_files: List[Dict[str, Any]]) -> str:
         """Determines the appropriate test or execution command."""
         file_names = [d["file"] for d in dev_files]
@@ -55,12 +97,8 @@ class QAEngineer(BaseRole):
 
             if target_test:
                 # Inspect if test file uses pytest syntax
-                try:
-                    content = self.file_manager.read_file(target_test)
-                    if "pytest" in content or ("def test_" in content and "unittest.TestCase" not in content):
-                        return f"pytest {target_test}"
-                except Exception:
-                    pass
+                if self._looks_like_pytest(target_test):
+                    return f"pytest {target_test}"
                 # `python -m unittest path/to/test_x.py` only works when the file
                 # is importable as a module: a bare `from calc import ...` inside
                 # it needs the test's own directory on sys.path, and a
